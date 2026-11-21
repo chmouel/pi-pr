@@ -75,18 +75,37 @@ const REVIEW_ICON: Record<Reviewer["state"], string> = {
 };
 const REVIEW_COLOR = { approved: "success", changes: "error", commented: "muted", requested: "warning", dismissed: "dim" } as const;
 
+// Value column wraps at this width so long lists (failed checks, reviewers) stay inside the border.
+const CELL_MAX = 72;
+
+function wrapCell(value: string, max: number): string[] {
+	const lines: string[] = [];
+	let cur = "";
+	for (const word of value.split(" ")) {
+		if (!cur) cur = word;
+		else if ([...cur].length + 1 + [...word].length <= max) cur += ` ${word}`;
+		else {
+			lines.push(cur);
+			cur = word;
+		}
+	}
+	lines.push(cur);
+	return lines;
+}
+
 function table(rows: [string, string][]): string {
-	const w0 = Math.max(5, ...rows.map(([k]) => k.length));
-	const w1 = Math.max(7, ...rows.map(([, v]) => [...v].length));
+	const cells = rows.map(([k, v]) => [k, wrapCell(v, CELL_MAX)] as const);
+	const w0 = Math.max(5, ...cells.map(([k]) => k.length));
+	const w1 = Math.max(7, ...cells.flatMap(([, lines]) => lines.map((l) => [...l].length)));
 	const bar = (l: string, m: string, r: string) => `${l}${"─".repeat(w0 + 2)}${m}${"─".repeat(w1 + 2)}${r}`;
-	const row = (k: string, v: string) => `│ ${k.padEnd(w0)} │ ${v}${" ".repeat(w1 - [...v].length)} │`;
-	const out = [bar("┌", "┬", "┐"), row("Field", "Details")];
-	for (const [k, v] of rows) out.push(bar("├", "┼", "┤"), row(k, v));
+	const row = (k: string, lines: string[]) =>
+		lines.map((v, i) => `│ ${(i === 0 ? k : "").padEnd(w0)} │ ${v}${" ".repeat(w1 - [...v].length)} │`);
+
+	const out = [bar("┌", "┬", "┐"), ...row("Field", ["Details"])];
+	for (const [k, lines] of cells) out.push(bar("├", "┼", "┤"), ...row(k, lines));
 	out.push(bar("└", "┴", "┘"));
 	return out.join("\n");
 }
-
-const link = (text: string, url: string) => `\x1b]8;;${url}\x1b\\${text}\x1b]8;;\x1b\\`;
 
 const titleCase = (s: string) => (s ? s[0].toUpperCase() + s.slice(1).toLowerCase().replace(/_/g, " ") : s);
 
