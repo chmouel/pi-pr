@@ -256,7 +256,8 @@ export default function (pi: ExtensionAPI) {
 		} else if (/auth|login|token|credential/.test(msg)) {
 			ctx.ui.setStatus(STATUS_KEY, t.fg("error", "gh not logged in"));
 		} else {
-			ctx.ui.setStatus(STATUS_KEY, t.fg("warning", "PR unavailable"));
+			// Network hiccups and odd gh failures: keep the footer clean rather than nagging.
+			ctx.ui.setStatus(STATUS_KEY, undefined);
 		}
 	}
 
