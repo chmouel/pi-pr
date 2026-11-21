@@ -107,6 +107,8 @@ function table(rows: [string, string][]): string {
 	return out.join("\n");
 }
 
+const link = (text: string, url: string) => `\x1b]8;;${url}\x1b\\${text}\x1b]8;;\x1b\\`;
+
 const titleCase = (s: string) => (s ? s[0].toUpperCase() + s.slice(1).toLowerCase().replace(/_/g, " ") : s);
 
 // Sorts last among footer statuses so the footer's "..." truncation cuts the PR title, not other statuses.
