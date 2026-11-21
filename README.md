@@ -21,7 +21,7 @@ A status line under pi's footer, refreshed when a session starts, every minute, 
 ●  PR #122 · 1 pending · review required ·   · +4084-17 · feat: Sync Vocabulary…
 ```
 
-A merged or closed PR stays on screen for a day, then the line clears. When `gh` is missing or not logged in, the line says so instead of going blank.
+A merged or closed PR stays on screen for a day, then the line clears. When `gh` is missing or not logged in, the line says so instead of going blank. A checkout whose remote is not GitHub (GitLab, Codeberg, no remote) gets no line and no complaint, and `/pr` tells you there is nothing for `gh` to look at.
 
 The line carries the CI state, a clickable `PR #N` (OSC 8 hyperlink), the CI tally, the review decision, each reviewer's state, merge conflicts, the diff size, and the PR title. The title sits last, so it is the part pi truncates when the terminal is narrow.
 

@@ -153,6 +153,10 @@ const TERMINAL_RETENTION_MS = 24 * 60 * 60 * 1000;
 const FIELDS =
 	"number,title,state,isDraft,url,headRefName,baseRefName,reviewDecision,mergeable,author,statusCheckRollup,additions,deletions,changedFiles,closedAt,mergedAt,reviews,latestReviews,reviewRequests";
 
+/** What gh says when the checkout has no remote it recognises as GitHub. */
+const NOT_GITHUB = /known github host|not a github/i;
+const NOT_GITHUB_NOTICE = "Not a GitHub repository, nothing for gh to look at";
+
 function checkResult(c: Check): "pass" | "fail" | "pending" | "skip" {
 	const v = (c.conclusion || c.state || c.status || "").toUpperCase();
 	if (["SUCCESS", "NEUTRAL"].includes(v)) return "pass";
@@ -184,6 +188,9 @@ export default function (pi: ExtensionAPI) {
 	let generation = 0;
 	// The fallback lookup below costs two gh calls per refresh; the resolved number survives per branch.
 	let branchCache: { key: string; number: number } | undefined;
+	// gh refuses to run outside a GitHub remote (GitLab, Codeberg, no remote at all). Remember that per
+	// repo so those checkouts stay silent and we stop shelling out on every refresh.
+	const notGitHub = new Set<string>();
 
 	pi.registerEntryRenderer("pr-card", (entry, _opts, theme) => {
 		const { text, url, number, heading } = entry.data as { text: string; url?: string; number?: number; heading?: string };
@@ -209,8 +216,13 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	async function fetchPR(ctx: ExtensionContext, signal?: AbortSignal): Promise<{ pr?: PR; error?: string }> {
+	async function fetchPR(ctx: ExtensionContext, signal?: AbortSignal): Promise<{ pr?: PR; error?: string; notGitHub?: boolean }> {
+		if (notGitHub.has(ctx.cwd)) return { notGitHub: true };
 		const direct = await ghJSON<PR>(ctx, ["pr", "view", "--json", FIELDS], signal);
+		if (!direct.data && direct.error && NOT_GITHUB.test(direct.error)) {
+			notGitHub.add(ctx.cwd);
+			return { notGitHub: true };
+		}
 		if (direct.data || !direct.error?.includes("no pull requests found")) return { pr: direct.data, error: direct.error };
 		// gh only matches the branch's tracked remote (e.g. chmouel:branch); the PR may come from another fork
 		// or the base repo itself, so search by branch name regardless of head owner.
@@ -244,10 +256,13 @@ export default function (pi: ExtensionAPI) {
 		return { error: direct.error };
 	}
 
-	function failureStatus(ctx: ExtensionContext, error: string | undefined) {
+	function failureStatus(ctx: ExtensionContext, { error, notGitHub: other }: { error?: string; notGitHub?: boolean }) {
 		const t = ctx.ui.theme;
 		const msg = (error || "").toLowerCase();
-		if (!msg) {
+		if (other) {
+			// GitLab and friends have no PRs for gh to find; a red "gh not logged in" would just be a lie.
+			ctx.ui.setStatus(STATUS_KEY, undefined);
+		} else if (!msg) {
 			ctx.ui.setStatus(STATUS_KEY, undefined);
 		} else if (msg.includes("no pull requests found") || msg.includes("no open pull request")) {
 			ctx.ui.setStatus(STATUS_KEY, undefined);
@@ -266,12 +281,12 @@ export default function (pi: ExtensionAPI) {
 		inflight?.abort();
 		const controller = new AbortController();
 		inflight = controller;
-		const { pr, error } = await fetchPR(ctx, controller.signal);
+		const { pr, error, notGitHub: other } = await fetchPR(ctx, controller.signal);
 		if (controller.signal.aborted) return;
 
 		if (!pr) {
 			terminalSince = undefined;
-			failureStatus(ctx, error);
+			failureStatus(ctx, { error, notGitHub: other });
 			return;
 		}
 
@@ -367,6 +382,7 @@ export default function (pi: ExtensionAPI) {
 		stopTimers();
 		terminalSince = undefined;
 		branchCache = undefined;
+		notGitHub.clear();
 		await watchHead(ctx);
 		refreshStatus(ctx).catch(() => {});
 		schedule(ctx);
@@ -391,8 +407,11 @@ export default function (pi: ExtensionAPI) {
 			const sub = (args || "").trim();
 
 			if (sub === "open") {
-				const { pr, error } = await fetchPR(ctx);
-				if (!pr) return ctx.ui.notify(error || "No PR for the current branch", "error");
+				const { pr, error, notGitHub: other } = await fetchPR(ctx);
+				if (!pr) {
+					const notice = other ? NOT_GITHUB_NOTICE : error || "No PR for the current branch";
+					return ctx.ui.notify(notice, other ? "warning" : "error");
+				}
 				let r: Awaited<ReturnType<typeof pi.exec>>;
 				try {
 					r = await pi.exec("gh", ["pr", "view", pr.url, "--web"], { cwd: ctx.cwd, timeout: 15000 });
@@ -403,10 +422,11 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			const { pr, error } = await fetchPR(ctx);
+			const { pr, error, notGitHub: other } = await fetchPR(ctx);
 			if (!pr) {
-				failureStatus(ctx, error);
-				ctx.ui.notify(error?.includes("no pull requests found") ? "No PR for the current branch" : `gh: ${error}`, "warning");
+				failureStatus(ctx, { error, notGitHub: other });
+				if (other) ctx.ui.notify(NOT_GITHUB_NOTICE, "warning");
+				else ctx.ui.notify(error?.includes("no pull requests found") ? "No PR for the current branch" : `gh: ${error}`, "warning");
 				return;
 			}
 			await refreshStatus(ctx);
