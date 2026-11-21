@@ -148,7 +148,9 @@ const titleCase = (s: string) => (s ? s[0].toUpperCase() + s.slice(1).toLowerCas
 
 // Sorts last among footer statuses so the footer's "..." truncation cuts the PR title, not other statuses.
 const STATUS_KEY = "zz-pr";
+// Poll fast while checks or reviews are in flight, slower when nothing is likely to change.
 const REFRESH_MS = 60_000;
+const IDLE_MS = 5 * 60_000;
 const TERMINAL_RETENTION_MS = 24 * 60 * 60 * 1000;
 const FIELDS =
 	"number,title,state,isDraft,url,headRefName,baseRefName,reviewDecision,mergeable,author,statusCheckRollup,additions,deletions,changedFiles,closedAt,mergedAt,reviews,latestReviews,reviewRequests";
@@ -182,6 +184,9 @@ export default function (pi: ExtensionAPI) {
 	let watchedHead: string | undefined;
 	let terminalSince: number | undefined;
 	let generation = 0;
+	let pollDelay = REFRESH_MS;
+	// The fallback lookup below costs two gh calls per refresh; the resolved number survives per branch.
+	let branchCache: { key: string; number: number } | undefined;
 
 	pi.registerEntryRenderer("pr-card", (entry, _opts, theme) => {
 		const { text, url, number, heading } = entry.data as { text: string; url?: string; number?: number; heading?: string };
@@ -220,6 +225,12 @@ export default function (pi: ExtensionAPI) {
 		}
 		const branch = b.stdout.trim();
 		if (b.code !== 0 || !branch) return { error: direct.error };
+		const cacheKey = `${ctx.cwd}\u0000${branch}`;
+		if (branchCache?.key === cacheKey) {
+			const cached = await ghJSON<PR>(ctx, ["pr", "view", String(branchCache.number), "--json", FIELDS], signal);
+			if (cached.data) return { pr: cached.data };
+			branchCache = undefined;
+		}
 		for (const state of ["open", "all"]) {
 			const list = await ghJSON<{ number: number }[]>(
 				ctx,
@@ -229,6 +240,7 @@ export default function (pi: ExtensionAPI) {
 			const num = list.data?.[0]?.number;
 			if (num) {
 				const v = await ghJSON<PR>(ctx, ["pr", "view", String(num), "--json", FIELDS], signal);
+				if (v.data) branchCache = { key: cacheKey, number: num };
 				return { pr: v.data, error: v.error };
 			}
 		}
@@ -261,6 +273,7 @@ export default function (pi: ExtensionAPI) {
 
 		if (!pr) {
 			terminalSince = undefined;
+			pollDelay = IDLE_MS;
 			failureStatus(ctx, error);
 			return;
 		}
@@ -275,6 +288,8 @@ export default function (pi: ExtensionAPI) {
 		const t = ctx.ui.theme;
 		const checks = pr.statusCheckRollup ?? [];
 		const c = summarizeChecks(checks);
+		const settled = !c.pending && pr.reviewDecision !== "REVIEW_REQUIRED" && pr.reviewDecision !== "";
+		pollDelay = pr.state === "OPEN" && !settled ? REFRESH_MS : IDLE_MS;
 		const icon = c.fail ? t.fg("error", "✗") : c.pending ? t.fg("warning", "●") : t.fg("success", "✓");
 		const label = pr.isDraft ? "draft " : pr.state !== "OPEN" ? `${pr.state.toLowerCase()} ` : "";
 		const sepDot = t.fg("dim", " · ");
@@ -304,7 +319,7 @@ export default function (pi: ExtensionAPI) {
 				.finally(() => {
 					if (gen === generation) schedule(ctx, gen);
 				});
-		}, REFRESH_MS);
+		}, pollDelay);
 		timer.unref?.();
 	}
 
@@ -356,6 +371,8 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_e, ctx) => {
 		stopTimers();
 		terminalSince = undefined;
+		branchCache = undefined;
+		pollDelay = REFRESH_MS;
 		await watchHead(ctx);
 		refreshStatus(ctx).catch(() => {});
 		schedule(ctx);
