@@ -93,16 +93,19 @@ function wrapCell(value: string, max: number): string[] {
 	return lines;
 }
 
-function table(rows: [string, string][]): string {
-	const cells = rows.map(([k, v]) => [k, wrapCell(v, CELL_MAX)] as const);
+type Row = [key: string, value: string, color?: string];
+
+function table(t: ExtensionContext["ui"]["theme"], rows: Row[]): string {
+	const cells = rows.map(([k, v, c]) => [k, wrapCell(v, CELL_MAX), c] as const);
 	const w0 = Math.max(5, ...cells.map(([k]) => k.length));
 	const w1 = Math.max(7, ...cells.flatMap(([, lines]) => lines.map((l) => [...l].length)));
-	const bar = (l: string, m: string, r: string) => `${l}${"─".repeat(w0 + 2)}${m}${"─".repeat(w1 + 2)}${r}`;
-	const row = (k: string, lines: string[]) =>
-		lines.map((v, i) => `│ ${(i === 0 ? k : "").padEnd(w0)} │ ${v}${" ".repeat(w1 - [...v].length)} │`);
+	const paint = (text: string, color?: string) => (color ? t.fg(color as never, text) : text);
+	const bar = (l: string, m: string, r: string) => t.fg("dim", `${l}${"─".repeat(w0 + 2)}${m}${"─".repeat(w1 + 2)}${r}`);
+	const row = (k: string, lines: string[], color?: string) =>
+		lines.map((v, i) => `│ ${t.fg("dim", (i === 0 ? k : "").padEnd(w0))} │ ${paint(v + " ".repeat(w1 - [...v].length), color)} │`);
 
 	const out = [bar("┌", "┬", "┐"), ...row("Field", ["Details"])];
-	for (const [k, lines] of cells) out.push(bar("├", "┼", "┤"), ...row(k, lines));
+	for (const [k, lines, color] of cells) out.push(bar("├", "┼", "┤"), ...row(k, lines, color));
 	out.push(bar("└", "┴", "┘"));
 	return out.join("\n");
 }
@@ -134,14 +137,11 @@ function summarizeChecks(checks: Check[]) {
 
 export default function (pi: ExtensionAPI) {
 	pi.registerEntryRenderer("pr-card", (entry, _opts, theme) => {
-		const { text, url, number } = entry.data as { text: string; url?: string; number?: number };
-		let [title, ...rest] = String(text).split("\n");
-		let body = rest.join("\n");
-		if (url) {
-			title = title.replace(`PR #${number}`, link(`PR #${number}`, url));
-			body = body.replace(url, link(url, url));
-		}
-		return new Text(`${theme.bold(theme.fg("accent", title))}\n${body}`, 1, 0);
+		const { text, url, number, heading } = entry.data as { text: string; url?: string; number?: number; heading?: string };
+		let head = heading ? theme.bold(theme.fg("accent", heading)) : "";
+		if (url && head) head = head.replace(`PR #${number}`, link(`PR #${number}`, url));
+		const body = url ? text.replace(url, link(url, url)) : text;
+		return new Text(head ? `${head}\n${body}` : body, 1, 0);
 	});
 
 	async function ghJSON<T>(ctx: ExtensionContext, args: string[]): Promise<{ data?: T; error?: string }> {
@@ -218,6 +218,7 @@ export default function (pi: ExtensionAPI) {
 				.filter((s) => s.startsWith(prefix.trim()))
 				.map((s) => ({ value: s, label: s })),
 		handler: async (args, ctx) => {
+			const t = ctx.ui.theme;
 			const sub = (args || "").trim();
 
 			if (sub === "open") {
@@ -242,8 +243,7 @@ export default function (pi: ExtensionAPI) {
 			const lines: string[] = [];
 
 			if (sub === "checks") {
-				lines.push(`Checks for PR #${pr.number}:`);
-				const icon = { pass: "✓", fail: "✗", pending: "●", skip: "-" };
+				const icon = { pass: t.fg("success", "✓"), fail: t.fg("error", "✗"), pending: t.fg("warning", "●"), skip: t.fg("dim", "-") };
 				for (const ch of checks) lines.push(`  ${icon[checkResult(ch)]} ${ch.name || ch.context}`);
 				if (!checks.length) lines.push("  (no checks)");
 			} else {
@@ -260,24 +260,33 @@ export default function (pi: ExtensionAPI) {
 					if (c.skip) parts.push(`${c.skip} skipped`);
 					ci = parts.join(", ");
 				}
-				const rows: [string, string][] = [
-					["State", pr.isDraft ? "Draft" : titleCase(pr.state)],
-					["Branch", `\ue0a0 ${pr.headRefName} → ${pr.baseRefName}`],
-					["URL", pr.url],
+				const stateColor = pr.isDraft ? "warning" : pr.state === "OPEN" ? "success" : pr.state === "MERGED" ? "accent" : "error";
+				const ciColor = !checks.length ? "dim" : c.fail ? "error" : c.pending ? "warning" : "success";
+				const reviewColor = revs.some((r) => r.state === "changes")
+					? "error"
+					: revs.length && revs.every((r) => r.state === "approved")
+						? "success"
+						: "dim";
+				const mergeColor = pr.mergeable === "CONFLICTING" ? "error" : pr.mergeable === "MERGEABLE" ? "success" : "warning";
+				const rows: Row[] = [
+					["State", pr.isDraft ? "Draft" : titleCase(pr.state), stateColor],
+					["Branch", `\ue0a0 ${pr.headRefName} → ${pr.baseRefName}`, "accent"],
+					["URL", pr.url, "accent"],
 					["Changes", `+${pr.additions} / -${pr.deletions} across ${pr.changedFiles} files`],
 					["Author", `@${pr.author?.login}`],
-					["Reviews", reviews],
-					["Mergeable", titleCase(pr.mergeable)],
-					["CI Checks", ci],
+					["Reviews", reviews, reviewColor],
+					["Mergeable", titleCase(pr.mergeable), mergeColor],
+					["CI Checks", ci, ciColor],
 				];
 				if (c.fail) {
 					const failed = checks.filter((ch) => checkResult(ch) === "fail").map((ch) => ch.name || ch.context || "?");
-					rows.push(["Failed", failed.join(", ")]);
+					rows.push(["Failed", failed.join(", "), "error"]);
 				}
-				lines.push(`PR #${pr.number} — ${pr.title}`, "", table(rows));
+				lines.push("", table(t, rows));
 			}
 
-			pi.appendEntry("pr-card", { text: lines.join("\n"), url: pr.url, number: pr.number });
+			const heading = sub === "checks" ? `Checks for PR #${pr.number}` : `PR #${pr.number} — ${pr.title}`;
+			pi.appendEntry("pr-card", { text: lines.join("\n"), url: pr.url, number: pr.number, heading });
 		},
 	});
 }
