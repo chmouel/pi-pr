@@ -52,15 +52,7 @@ The summary lands in the transcript as a card. It is not sent to the model.
 
 Use this one for the footer status, the transcript table and the fork-aware lookup. Use `@henryqw/pi-pr` if you want the agent to act on the PR rather than display it.
 
-## Release
-
-Publishing runs on [trusted publishing](https://docs.npmjs.com/trusted-publishers/): GitHub Actions authenticates with OIDC and no npm token is stored anywhere.
-
-```sh
-npm version patch && git push --follow-tags
-```
-
-The `v*` tag starts `.github/workflows/publish.yml`, which skips versions already on the registry.
+Development, releasing and layout notes live in [DEVELOPER.md](DEVELOPER.md).
 
 ## License
 
