@@ -2,6 +2,8 @@
 
 A [pi](https://pi.dev) extension that shows the GitHub pull request attached to the current branch, similar to Copilot CLI's `/pr`.
 
+<img width="1538" height="180" alt="image" src="https://github.com/user-attachments/assets/23a37419-e8a4-4292-b92a-b7c0da4bf6b8" />
+
 ## Install
 
 ```sh
