@@ -1,57 +1,66 @@
 # pi-pr
 
-A [pi](https://pi.dev) extension that shows the GitHub pull request attached to the current branch, similar to Copilot CLI's `/pr`.
+A [pi](https://pi.dev) extension that shows the GitHub pull request for the current branch, like Copilot CLI's `/pr`.
 
-<img width="1547" height="1044" alt="image" src="https://github.com/user-attachments/assets/8f7f6d3a-d584-4e18-a05d-eefb8b5b773e" />
+<img width="1547" height="1044" alt="screenshot of the footer status and /pr table" src="https://github.com/user-attachments/assets/8f7f6d3a-d584-4e18-a05d-eefb8b5b773e" />
 
 ## Install
 
 ```sh
 pi install npm:@chmouel/pi-pr
-# or straight from git
-pi install git:github.com/chmouel/pi-pr
+pi install git:github.com/chmouel/pi-pr   # straight from git
 ```
 
-Requires the [`gh`](https://cli.github.com/) CLI, installed and authenticated.
+You need the [`gh`](https://cli.github.com/) CLI installed and authenticated.
 
-## Footer
+## What you get
 
-A status line below pi's footer, refreshed on session start and after each agent run:
+A status line under pi's footer, refreshed when a session starts and after each agent run:
 
 ```
 ●  PR #122 · 1 pending · review required ·   · +4084-17 · feat: Sync Vocabulary…
 ```
 
-- CI state icon, then a clickable `PR #N` (OSC 8 hyperlink)
-- CI summary, review decision, and per-reviewer state
-- merge conflicts, diff size, then the PR title, truncated to fit the screen
+The line carries the CI state, a clickable `PR #N` (OSC 8 hyperlink), the CI tally, the review decision, each reviewer's state, merge conflicts, the diff size, and the PR title. The title sits last, so it is the part pi truncates when the terminal is narrow.
 
-Reviewer icons use [Nerd Font](https://www.nerdfonts.com/) Octicons: approved, changes requested, commented, requested, dismissed. Copilot is shown with its own icon.
+Reviewer states use [Nerd Font](https://www.nerdfonts.com/) Octicons for approved, changes requested, commented, requested and dismissed. Copilot gets its own glyph.
 
 ## Commands
 
-| Command | Description |
+| Command | Does |
 | --- | --- |
-| `/pr` | PR summary table (state, branch, URL, changes, reviews, CI) |
-| `/pr checks` | List each check with its result |
+| `/pr` | Print a summary table: state, branch, URL, changes, reviews, CI |
+| `/pr checks` | Print each check with its result |
 | `/pr open` | Open the PR in the browser |
 | `/pr refresh` | Refresh the footer status |
 
-The summary is shown in the transcript only and is not sent to the model.
+The summary lands in the transcript as a card. It is not sent to the model.
 
-## PR detection
+## Finding the PR
 
-It first asks `gh pr view`. When the branch tracks a fork but the PR was opened from another remote (for example pushed directly to the upstream repo), it falls back to `gh pr list --head <branch>`, preferring open PRs.
+`gh pr view` answers first. If it reports no PR, the extension falls back to `gh pr list --head <branch>`, which finds a PR opened from a different remote than the one the branch tracks. That case shows up when you push straight to the upstream repository while the branch tracks your fork.
+
+## Similar packages
+
+| Package | Scope |
+| --- | --- |
+| `@narumitw/pi-github-pr` | Shows PR review, check and comment status. Closest overlap with this extension. |
+| `@henryqw/pi-pr` | `/pr` command that finds, creates, updates and merges PRs, then fixes CI from review feedback. |
+| `pi-prs` | Pulls review feedback into the agent and watches PRs. |
+| `@pikibun/pi-pr-flow` | Drives a change through the PR lifecycle, draft first, ready later. |
+| `@sfroment/pi-gh-cli`, `@procedures/gh` | Wrap the `gh` CLI as tools, no PR status line. |
+
+Use this one for the footer status, the transcript table and the fork-aware lookup. Use `@henryqw/pi-pr` if you want the agent to act on the PR rather than display it.
 
 ## Release
 
-Publishing uses [trusted publishing](https://docs.npmjs.com/trusted-publishers/): no long-lived npm token, the GitHub Actions workflow authenticates with OIDC.
+Publishing runs on [trusted publishing](https://docs.npmjs.com/trusted-publishers/): GitHub Actions authenticates with OIDC and no npm token is stored anywhere.
 
 ```sh
-npm version patch && git push --follow-tags   # tag vX.Y.Z triggers .github/workflows/publish.yml
+npm version patch && git push --follow-tags
 ```
 
-The first publish has to happen with an authenticated CLI session (`npm login`) or by configuring the trusted publisher for `chmouel/pi-pr` with workflow filename `publish.yml` first.
+The `v*` tag starts `.github/workflows/publish.yml`, which skips versions already on the registry.
 
 ## License
 
