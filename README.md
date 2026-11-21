@@ -43,6 +43,16 @@ The summary is shown in the transcript only and is not sent to the model.
 
 It first asks `gh pr view`. When the branch tracks a fork but the PR was opened from another remote (for example pushed directly to the upstream repo), it falls back to `gh pr list --head <branch>`, preferring open PRs.
 
+## Release
+
+Publishing uses [trusted publishing](https://docs.npmjs.com/trusted-publishers/): no long-lived npm token, the GitHub Actions workflow authenticates with OIDC.
+
+```sh
+npm version patch && git push --follow-tags   # tag vX.Y.Z triggers .github/workflows/publish.yml
+```
+
+The first publish has to happen with an authenticated CLI session (`npm login`) or by configuring the trusted publisher for `chmouel/pi-pr` with workflow filename `publish.yml` first.
+
 ## License
 
 Apache-2.0
