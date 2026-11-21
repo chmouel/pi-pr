@@ -7,7 +7,7 @@ A [pi](https://pi.dev) extension that shows the GitHub pull request attached to 
 ## Install
 
 ```sh
-pi install npm:pi-pr
+pi install npm:@chmouel/pi-pr
 # or straight from git
 pi install git:github.com/chmouel/pi-pr
 ```

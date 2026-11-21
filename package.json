@@ -1,16 +1,33 @@
 {
-  "name": "pi-pr",
+  "name": "@chmouel/pi-pr",
   "version": "0.1.0",
   "description": "Pi extension: /pr command and footer status for the GitHub pull request of the current branch",
-  "keywords": ["pi-package", "pi", "github", "pull-request", "gh"],
+  "keywords": [
+    "pi-package",
+    "pi",
+    "github",
+    "pull-request",
+    "gh"
+  ],
   "license": "Apache-2.0",
   "author": "Chmouel Boudjnah <chmouel@chmouel.com>",
   "homepage": "https://github.com/chmouel/pi-pr",
-  "repository": { "type": "git", "url": "git+https://github.com/chmouel/pi-pr.git" },
-  "bugs": { "url": "https://github.com/chmouel/pi-pr/issues" },
-  "files": ["extensions", "README.md", "LICENSE"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chmouel/pi-pr.git"
+  },
+  "bugs": {
+    "url": "https://github.com/chmouel/pi-pr/issues"
+  },
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
   "pi": {
-    "extensions": ["./extensions/pr.ts"]
+    "extensions": [
+      "./extensions/pr.ts"
+    ]
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
