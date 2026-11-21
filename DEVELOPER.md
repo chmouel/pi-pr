@@ -12,15 +12,23 @@ The `v*` tag starts `.github/workflows/publish.yml`. The workflow skips a versio
 
 The trusted publisher on npmjs.com is bound to user `chmouel`, repository `pi-pr` and workflow filename `publish.yml`. A mismatch on any of the three is why a CI publish fails with `ENEEDAUTH`.
 
-## Updating the installed copy
+## Working on it
 
-The extension is loaded from `~/.pi/agent/extensions/pr.ts` when installed locally, and from the npm package when installed with `pi install`. Edits made in this repo only reach a local install if you copy the file over:
+The extension is installed from npm, so pi loads the published file:
 
 ```sh
-cp extensions/pr.ts ~/.pi/agent/extensions/pr.ts
+pi install npm:@chmouel/pi-pr
+pi update --extensions        # after a release
 ```
 
-Then run `/reload` inside pi.
+To test a change before releasing it, install the checkout instead. Pi loads the local path directly and picks up edits on `/reload`:
+
+```sh
+pi uninstall npm:@chmouel/pi-pr
+pi install ~/git/perso/pi-pr
+```
+
+Swapping back afterwards means removing the local source from `packages` in `~/.pi/agent/settings.json` and installing the npm one again.
 
 ## Layout
 
