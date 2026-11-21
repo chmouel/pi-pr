@@ -148,9 +148,7 @@ const titleCase = (s: string) => (s ? s[0].toUpperCase() + s.slice(1).toLowerCas
 
 // Sorts last among footer statuses so the footer's "..." truncation cuts the PR title, not other statuses.
 const STATUS_KEY = "zz-pr";
-// Poll fast while checks or reviews are in flight, slower when nothing is likely to change.
 const REFRESH_MS = 60_000;
-const IDLE_MS = 5 * 60_000;
 const TERMINAL_RETENTION_MS = 24 * 60 * 60 * 1000;
 const FIELDS =
 	"number,title,state,isDraft,url,headRefName,baseRefName,reviewDecision,mergeable,author,statusCheckRollup,additions,deletions,changedFiles,closedAt,mergedAt,reviews,latestReviews,reviewRequests";
@@ -184,7 +182,6 @@ export default function (pi: ExtensionAPI) {
 	let watchedHead: string | undefined;
 	let terminalSince: number | undefined;
 	let generation = 0;
-	let pollDelay = REFRESH_MS;
 	// The fallback lookup below costs two gh calls per refresh; the resolved number survives per branch.
 	let branchCache: { key: string; number: number } | undefined;
 
@@ -273,7 +270,6 @@ export default function (pi: ExtensionAPI) {
 
 		if (!pr) {
 			terminalSince = undefined;
-			pollDelay = IDLE_MS;
 			failureStatus(ctx, error);
 			return;
 		}
@@ -288,8 +284,6 @@ export default function (pi: ExtensionAPI) {
 		const t = ctx.ui.theme;
 		const checks = pr.statusCheckRollup ?? [];
 		const c = summarizeChecks(checks);
-		const settled = !c.pending && pr.reviewDecision !== "REVIEW_REQUIRED" && pr.reviewDecision !== "";
-		pollDelay = pr.state === "OPEN" && !settled ? REFRESH_MS : IDLE_MS;
 		const icon = c.fail ? t.fg("error", "✗") : c.pending ? t.fg("warning", "●") : t.fg("success", "✓");
 		const label = pr.isDraft ? "draft " : pr.state !== "OPEN" ? `${pr.state.toLowerCase()} ` : "";
 		const sepDot = t.fg("dim", " · ");
@@ -319,7 +313,7 @@ export default function (pi: ExtensionAPI) {
 				.finally(() => {
 					if (gen === generation) schedule(ctx, gen);
 				});
-		}, pollDelay);
+		}, REFRESH_MS);
 		timer.unref?.();
 	}
 
@@ -372,7 +366,6 @@ export default function (pi: ExtensionAPI) {
 		stopTimers();
 		terminalSince = undefined;
 		branchCache = undefined;
-		pollDelay = REFRESH_MS;
 		await watchHead(ctx);
 		refreshStatus(ctx).catch(() => {});
 		schedule(ctx);
