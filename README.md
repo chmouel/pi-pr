@@ -15,11 +15,13 @@ You need the [`gh`](https://cli.github.com/) CLI installed and authenticated.
 
 ## What you get
 
-A status line under pi's footer, refreshed when a session starts and after each agent run:
+A status line under pi's footer, refreshed when a session starts, every minute, after each agent run, and as soon as you switch branch:
 
 ```
 ●  PR #122 · 1 pending · review required ·   · +4084-17 · feat: Sync Vocabulary…
 ```
+
+A merged or closed PR stays on screen for a day, then the line clears. When `gh` is missing or not logged in, the line says so instead of going blank.
 
 The line carries the CI state, a clickable `PR #N` (OSC 8 hyperlink), the CI tally, the review decision, each reviewer's state, merge conflicts, the diff size, and the PR title. The title sits last, so it is the part pi truncates when the terminal is narrow.
 
@@ -39,6 +41,10 @@ The summary lands in the transcript as a card. It is not sent to the model.
 ## Finding the PR
 
 `gh pr view` answers first. If it reports no PR, the extension falls back to `gh pr list --head <branch>`, which finds a PR opened from a different remote than the one the branch tracks. That case shows up when you push straight to the upstream repository while the branch tracks your fork.
+
+## Credits
+
+The polling cadence, the branch-change watch, the one-day retention for merged PRs, the `gh` missing and `gh not logged in` states, and the control-character and hyperlink-capability guards come from [@narumitw/pi-github-pr](https://www.npmjs.com/package/@narumitw/pi-github-pr). Its plain-text status line is what led to this extension growing a command and a transcript card on top.
 
 ## Similar packages
 

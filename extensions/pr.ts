@@ -6,12 +6,17 @@
  *   /pr checks   list individual checks
  *   /pr refresh  refresh the footer status
  *
- * Also keeps a "PR #123" footer status, refreshed on session start and after each agent run.
- * Requires the `gh` CLI to be installed and authenticated.
+ * Also keeps a footer status for the current branch, refreshed every minute, after each agent
+ * run, and when the git branch changes. A merged or closed PR stays visible for a day.
+ *
+ * Requires the `gh` CLI, installed and authenticated.
+ * Refresh and retention behaviour was inspired by @narumitw/pi-github-pr.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { getCapabilities, hyperlink, Text } from "@earendil-works/pi-tui";
+import { watch, type FSWatcher } from "node:fs";
+import { resolve } from "node:path";
 
 type Check = { name?: string; context?: string; status?: string; conclusion?: string; state?: string };
 type PR = {
@@ -29,6 +34,8 @@ type PR = {
 	additions: number;
 	deletions: number;
 	changedFiles: number;
+	closedAt: string | null;
+	mergedAt: string | null;
 	reviews: { author: { login: string }; state: string }[];
 	latestReviews: { author: { login: string }; state: string }[];
 	reviewRequests: { login?: string; name?: string; slug?: string }[];
@@ -75,6 +82,33 @@ const REVIEW_ICON: Record<Reviewer["state"], string> = {
 };
 const REVIEW_COLOR = { approved: "success", changes: "error", commented: "muted", requested: "warning", dismissed: "dim" } as const;
 
+/** Drops control characters so a hostile PR title cannot drive the terminal. */
+function plain(value: string): string {
+	let out = "";
+	for (const ch of value.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")) {
+		const cp = ch.codePointAt(0) ?? 0;
+		if (cp > 0x1f && cp !== 0x7f) out += ch;
+	}
+	return out;
+}
+
+const link = (text: string, url: string): string => {
+	const safeText = plain(text);
+	let parsed: URL;
+	try {
+		parsed = new URL(url);
+	} catch {
+		return safeText;
+	}
+	if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return safeText;
+	try {
+		if (!getCapabilities().hyperlinks) return safeText;
+	} catch {
+		return safeText;
+	}
+	return hyperlink(safeText, plain(parsed.toString()));
+};
+
 // Value column wraps at this width so long lists (failed checks, reviewers) stay inside the border.
 const CELL_MAX = 72;
 
@@ -110,15 +144,14 @@ function table(t: ExtensionContext["ui"]["theme"], rows: Row[]): string {
 	return out.join("\n");
 }
 
-const link = (text: string, url: string) => `\x1b]8;;${url}\x1b\\${text}\x1b]8;;\x1b\\`;
-
 const titleCase = (s: string) => (s ? s[0].toUpperCase() + s.slice(1).toLowerCase().replace(/_/g, " ") : s);
 
 // Sorts last among footer statuses so the footer's "..." truncation cuts the PR title, not other statuses.
 const STATUS_KEY = "zz-pr";
-
+const REFRESH_MS = 60_000;
+const TERMINAL_RETENTION_MS = 24 * 60 * 60 * 1000;
 const FIELDS =
-	"number,title,state,isDraft,url,headRefName,baseRefName,reviewDecision,mergeable,author,statusCheckRollup,additions,deletions,changedFiles,reviews,latestReviews,reviewRequests";
+	"number,title,state,isDraft,url,headRefName,baseRefName,reviewDecision,mergeable,author,statusCheckRollup,additions,deletions,changedFiles,closedAt,mergedAt,reviews,latestReviews,reviewRequests";
 
 function checkResult(c: Check): "pass" | "fail" | "pending" | "skip" {
 	const v = (c.conclusion || c.state || c.status || "").toUpperCase();
@@ -134,8 +167,22 @@ function summarizeChecks(checks: Check[]) {
 	return counts;
 }
 
+/** A merged or closed PR leaves the footer once the retention window is over. */
+function stillWorthShowing(pr: PR, since: number): boolean {
+	if (pr.state === "OPEN") return true;
+	const at = Date.parse(pr.mergedAt || pr.closedAt || "");
+	const started = Number.isFinite(at) ? at : since;
+	return Date.now() - started < TERMINAL_RETENTION_MS;
+}
 
 export default function (pi: ExtensionAPI) {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	let inflight: AbortController | undefined;
+	let watcher: FSWatcher | undefined;
+	let watchedHead: string | undefined;
+	let terminalSince: number | undefined;
+	let generation = 0;
+
 	pi.registerEntryRenderer("pr-card", (entry, _opts, theme) => {
 		const { text, url, number, heading } = entry.data as { text: string; url?: string; number?: number; heading?: string };
 		let head = heading ? theme.bold(theme.fg("accent", heading)) : "";
@@ -144,9 +191,15 @@ export default function (pi: ExtensionAPI) {
 		return new Text(head ? `${head}\n${body}` : body, 1, 0);
 	});
 
-	async function ghJSON<T>(ctx: ExtensionContext, args: string[]): Promise<{ data?: T; error?: string }> {
-		const r = await pi.exec("gh", args, { cwd: ctx.cwd, timeout: 15000 });
+	async function ghJSON<T>(ctx: ExtensionContext, args: string[], signal?: AbortSignal): Promise<{ data?: T; error?: string }> {
+		let r: Awaited<ReturnType<typeof pi.exec>>;
+		try {
+			r = await pi.exec("gh", args, { cwd: ctx.cwd, timeout: 15000, signal });
+		} catch (e) {
+			return { error: String(e) };
+		}
 		if (r.code !== 0) return { error: (r.stderr || r.stdout).trim() || `gh exited with code ${r.code}` };
+		if (r.truncated) return { error: "gh output too large" };
 		try {
 			return { data: JSON.parse(r.stdout) as T };
 		} catch (e) {
@@ -154,42 +207,80 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	async function fetchPR(ctx: ExtensionContext): Promise<{ pr?: PR; error?: string }> {
-		const direct = await ghJSON<PR>(ctx, ["pr", "view", "--json", FIELDS]);
+	async function fetchPR(ctx: ExtensionContext, signal?: AbortSignal): Promise<{ pr?: PR; error?: string }> {
+		const direct = await ghJSON<PR>(ctx, ["pr", "view", "--json", FIELDS], signal);
 		if (direct.data || !direct.error?.includes("no pull requests found")) return { pr: direct.data, error: direct.error };
-
 		// gh only matches the branch's tracked remote (e.g. chmouel:branch); the PR may come from another fork
 		// or the base repo itself, so search by branch name regardless of head owner.
-		const b = await pi.exec("git", ["branch", "--show-current"], { cwd: ctx.cwd, timeout: 5000 });
+		let b: Awaited<ReturnType<typeof pi.exec>>;
+		try {
+			b = await pi.exec("git", ["branch", "--show-current"], { cwd: ctx.cwd, timeout: 5000, signal });
+		} catch {
+			return { error: direct.error };
+		}
 		const branch = b.stdout.trim();
 		if (b.code !== 0 || !branch) return { error: direct.error };
 		for (const state of ["open", "all"]) {
-			const list = await ghJSON<{ number: number }[]>(ctx, ["pr", "list", "--head", branch, "--state", state, "--limit", "1", "--json", "number"]);
+			const list = await ghJSON<{ number: number }[]>(
+				ctx,
+				["pr", "list", "--head", branch, "--state", state, "--limit", "1", "--json", "number"],
+				signal,
+			);
 			const num = list.data?.[0]?.number;
 			if (num) {
-				const v = await ghJSON<PR>(ctx, ["pr", "view", String(num), "--json", FIELDS]);
+				const v = await ghJSON<PR>(ctx, ["pr", "view", String(num), "--json", FIELDS], signal);
 				return { pr: v.data, error: v.error };
 			}
 		}
 		return { error: direct.error };
 	}
 
+	function failureStatus(ctx: ExtensionContext, error: string | undefined) {
+		const t = ctx.ui.theme;
+		const msg = (error || "").toLowerCase();
+		if (!msg) {
+			ctx.ui.setStatus(STATUS_KEY, undefined);
+		} else if (msg.includes("no pull requests found") || msg.includes("no open pull request")) {
+			ctx.ui.setStatus(STATUS_KEY, undefined);
+		} else if (/enoent|not found|no such file|executable/.test(msg)) {
+			ctx.ui.setStatus(STATUS_KEY, t.fg("error", "gh missing"));
+		} else if (/auth|login|token|credential/.test(msg)) {
+			ctx.ui.setStatus(STATUS_KEY, t.fg("error", "gh not logged in"));
+		} else {
+			ctx.ui.setStatus(STATUS_KEY, t.fg("warning", "PR unavailable"));
+		}
+	}
+
 	async function refreshStatus(ctx: ExtensionContext) {
 		if (!ctx.hasUI) return;
-		const { pr } = await fetchPR(ctx);
+		inflight?.abort();
+		const controller = new AbortController();
+		inflight = controller;
+		const { pr, error } = await fetchPR(ctx, controller.signal);
+		if (controller.signal.aborted) return;
+
 		if (!pr) {
+			terminalSince = undefined;
+			failureStatus(ctx, error);
+			return;
+		}
+
+		if (pr.state === "OPEN") terminalSince = undefined;
+		else if (terminalSince === undefined) terminalSince = Date.now();
+		if (!stillWorthShowing(pr, terminalSince ?? Date.now())) {
 			ctx.ui.setStatus(STATUS_KEY, undefined);
 			return;
 		}
+
 		const t = ctx.ui.theme;
-		const c = summarizeChecks(pr.statusCheckRollup ?? []);
+		const checks = pr.statusCheckRollup ?? [];
+		const c = summarizeChecks(checks);
 		const icon = c.fail ? t.fg("error", "✗") : c.pending ? t.fg("warning", "●") : t.fg("success", "✓");
 		const label = pr.isDraft ? "draft " : pr.state !== "OPEN" ? `${pr.state.toLowerCase()} ` : "";
-		const n = (pr.statusCheckRollup ?? []).length;
 		const sepDot = t.fg("dim", " · ");
 		const parts: string[] = [`${icon} ${t.fg("dim", label)}${link(t.fg("accent", `PR #${pr.number}`), pr.url)}`];
-		if (n) {
-			const ciText = c.fail ? `${c.fail} failing` : c.pending ? `${c.pending} pending` : `${n} passing`;
+		if (checks.length) {
+			const ciText = c.fail ? `${c.fail} failing` : c.pending ? `${c.pending} pending` : `${checks.length} passing`;
 			parts.push(t.fg(c.fail ? "error" : c.pending ? "warning" : "dim", ciText));
 		}
 		if (pr.reviewDecision === "APPROVED") parts.push(t.fg("success", "approved"));
@@ -200,15 +291,82 @@ export default function (pi: ExtensionAPI) {
 			parts.push(revs.map((r) => t.fg(REVIEW_COLOR[r.state], `${REVIEW_ICON[r.state]} ${r.name}`)).join(" "));
 		if (pr.mergeable === "CONFLICTING") parts.push(t.fg("error", "conflicts"));
 		parts.push(`${t.fg("success", `+${pr.additions}`)}${t.fg("error", `-${pr.deletions}`)}`);
-		parts.push(pr.title);
+		parts.push(plain(pr.title));
 		ctx.ui.setStatus(STATUS_KEY, parts.join(sepDot));
 	}
 
+	function schedule(ctx: ExtensionContext, gen = generation) {
+		if (timer) clearTimeout(timer);
+		timer = setTimeout(() => {
+			if (gen !== generation) return;
+			void refreshStatus(ctx)
+				.catch(() => {})
+				.finally(() => {
+					if (gen === generation) schedule(ctx, gen);
+				});
+		}, REFRESH_MS);
+		timer.unref?.();
+	}
+
+	function stopTimers() {
+		generation++;
+		if (timer) clearTimeout(timer);
+		timer = undefined;
+		watcher?.close();
+		watcher = undefined;
+		watchedHead = undefined;
+		inflight?.abort();
+		inflight = undefined;
+	}
+
+	/** Refreshes as soon as the checked-out branch changes, without waiting for the poll. */
+	async function watchHead(ctx: ExtensionContext) {
+		let r: Awaited<ReturnType<typeof pi.exec>>;
+		try {
+			r = await pi.exec("git", ["rev-parse", "--git-path", "HEAD"], { cwd: ctx.cwd, timeout: 5000 });
+		} catch {
+			return;
+		}
+		if (r.code !== 0) return;
+		const head = resolve(ctx.cwd, r.stdout.trim());
+		if (head === watchedHead) return;
+		watcher?.close();
+		watchedHead = head;
+		try {
+			let debounce: ReturnType<typeof setTimeout> | undefined;
+			watcher = watch(head, () => {
+				if (debounce) clearTimeout(debounce);
+				debounce = setTimeout(() => {
+					refreshStatus(ctx).catch(() => {});
+				}, 300);
+				debounce.unref?.();
+			});
+			watcher.on("error", () => {
+				watcher?.close();
+				watcher = undefined;
+				watchedHead = undefined;
+			});
+			watcher.unref?.();
+		} catch {
+			watcher = undefined;
+			watchedHead = undefined;
+		}
+	}
+
 	pi.on("session_start", async (_e, ctx) => {
+		stopTimers();
+		terminalSince = undefined;
+		await watchHead(ctx);
 		refreshStatus(ctx).catch(() => {});
+		schedule(ctx);
 	});
+
 	pi.on("agent_end", async (_e, ctx) => {
 		refreshStatus(ctx).catch(() => {});
+	});
+
+	pi.on("session_shutdown", async () => {
+		stopTimers();
 	});
 
 	pi.registerCommand("pr", {
@@ -224,14 +382,19 @@ export default function (pi: ExtensionAPI) {
 			if (sub === "open") {
 				const { pr, error } = await fetchPR(ctx);
 				if (!pr) return ctx.ui.notify(error || "No PR for the current branch", "error");
-				const r = await pi.exec("gh", ["pr", "view", pr.url, "--web"], { cwd: ctx.cwd, timeout: 15000 });
+				let r: Awaited<ReturnType<typeof pi.exec>>;
+				try {
+					r = await pi.exec("gh", ["pr", "view", pr.url, "--web"], { cwd: ctx.cwd, timeout: 15000 });
+				} catch (e) {
+					return ctx.ui.notify(String(e), "error");
+				}
 				if (r.code !== 0) ctx.ui.notify((r.stderr || "could not open browser").trim(), "error");
 				return;
 			}
 
 			const { pr, error } = await fetchPR(ctx);
 			if (!pr) {
-				ctx.ui.setStatus(STATUS_KEY, undefined);
+				failureStatus(ctx, error);
 				ctx.ui.notify(error?.includes("no pull requests found") ? "No PR for the current branch" : `gh: ${error}`, "warning");
 				return;
 			}
@@ -284,8 +447,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				lines.push("", table(t, rows));
 			}
-
-			const heading = sub === "checks" ? `Checks for PR #${pr.number}` : `PR #${pr.number} — ${pr.title}`;
+			const heading = sub === "checks" ? `Checks for PR #${pr.number}` : `PR #${pr.number} — ${plain(pr.title)}`;
 			pi.appendEntry("pr-card", { text: lines.join("\n"), url: pr.url, number: pr.number, heading });
 		},
 	});
